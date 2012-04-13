@@ -1,0 +1,100 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <meta http-equiv="X-UA-Compatible" content="chrome=1">
+    <title>SpiderMonkey by folecr</title>
+    
+    <link rel="stylesheet" href="stylesheets/styles.css">
+    <link rel="stylesheet" href="stylesheets/pygment_trac.css">
+    <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+    <!--[if lt IE 9]>
+    <script src="//html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+  </head>
+  <body>
+    <div class="wrapper">
+      <header>
+        <h1>SpiderMonkey</h1>
+        <p>A static library of the SpiderMonkey JavaScript VM on Android for ARM</p>
+        <p class="view"><a href="https://github.com/folecr/spidermonkey">View the Project on GitHub <small>folecr/spidermonkey</small></a></p>
+        <ul>
+          <li><a href="https://github.com/folecr/spidermonkey/zipball/master">Download <strong>ZIP File</strong></a></li>
+          <li><a href="https://github.com/folecr/spidermonkey/tarball/master">Download <strong>TAR Ball</strong></a></li>
+          <li><a href="https://github.com/folecr/spidermonkey">Fork On <strong>GitHub</strong></a></li>
+        </ul>
+      </header>
+      <section>
+        <h1>spidermonkey</h1>
+
+<p>The <a href="https://developer.mozilla.org/En/SpiderMonkey/">SpiderMonkey</a> JavaScript VM buildable on Android</p>
+
+<h2>Demo</h2>
+
+<p><a href="http://folecr.github.com/hellojs-android">http://folecr.github.com/hellojs-android</a></p>
+
+<h2>Build</h2>
+
+<h4>Prerequisistes</h4>
+
+<ul>
+<li>autoconf213</li>
+<li>Android NDK</li>
+</ul><h3>How to</h3>
+
+<pre><code>&gt; mkdir mozilla &amp;&amp; cd mozilla
+&gt; git clone git://github.com/folecr/spidermonkey.git
+&gt; cd spidermonkey/js/src
+&gt; autoconf213
+&gt; cd build-android
+&gt; sh build.sh
+</code></pre>
+
+<p>Produces a static ARM library in </p>
+
+<pre><code>mozilla/spidermonkey/dist/lib
+</code></pre>
+
+<p>Include files are in </p>
+
+<pre><code>mozilla/spidermonkey/dist/include
+</code></pre>
+
+<p>Android NDK module is at</p>
+
+<pre><code>mozilla/spidermonkey/android/Android.mk
+</code></pre>
+
+<p>You can now use this module in your Android NDK project by including this in your Application.mk</p>
+
+<pre><code>$(call import-module,spidermonkey/android)
+</code></pre>
+
+<p>and adding the path to the mozilla directory to NDK_MODULE_PATH</p>
+
+<pre><code>NDK_MODULE_PATH=mozilla
+</code></pre>
+
+<p>For an example application that will run JavaScript scripts on your Android device see <a href="http://folecr.github.com/hellojs-android">http://folecr.github.com/hellojs-android</a>.</p>
+
+<p>Enjoy!</p>
+
+<h2>Authors and contributors</h2>
+
+<ul>
+<li>
+<a href="https://github.com/funkaster" class="user-mention">@funkaster</a> (iOS)</li>
+<li>
+<a href="https://github.com/folecr" class="user-mention">@folecr</a> (Android)</li>
+<li>The Mozilla SpiderMonkey team (duh)</li>
+</ul>
+      </section>
+      <footer>
+        <p>This project is maintained by <a href="https://github.com/folecr">folecr</a></p>
+        <p><small>Hosted on GitHub Pages &mdash; Theme by <a href="https://github.com/orderedlist">orderedlist</a></small></p>
+      </footer>
+    </div>
+    <script src="javascripts/scale.fix.js"></script>
+    
+  </body>
+</html>

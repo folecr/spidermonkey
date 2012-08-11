@@ -652,25 +652,6 @@ MapContextOptionNameToFlag(JSContext* cx, const char* name)
 
 extern JSClass global_class;
 
-#ifdef JS_GC_ZEAL
-static void
-ParseZealArg(JSContext *cx, const char *arg)
-{
-    int zeal, freq = 1, compartment = 0;
-    const char *p = strchr(arg, ',');
-
-    zeal = atoi(arg);
-    if (p) {
-        freq = atoi(p + 1);
-        p = strchr(p + 1, ',');
-        if (p)
-            compartment = atoi(p + 1);
-    }
-
-    JS_SetGCZeal(cx, (uint8_t)zeal, freq, !!compartment);
-}
-#endif
-
 static JSBool
 Version(JSContext *cx, unsigned argc, jsval *vp)
 {
@@ -940,10 +921,10 @@ FileAsTypedArray(JSContext *cx, const char *pathname)
         if (fseek(file, 0, SEEK_SET) != 0) {
             JS_ReportError(cx, "can't seek start of %s", pathname);
         } else {
-            obj = js_CreateTypedArray(cx, TypedArray::TYPE_UINT8, len);
+            obj = JS_NewUint8Array(cx, len);
             if (!obj)
                 return NULL;
-            char *buf = (char *) TypedArray::getDataOffset(TypedArray::getTypedArray(obj));
+            char *buf = (char *) TypedArray::getDataOffset(obj);
             size_t cc = fread(buf, 1, len, file);
             if (cc != len) {
                 JS_ReportError(cx, "can't read %s: %s", pathname,
@@ -1303,11 +1284,19 @@ SetDebug(JSContext *cx, unsigned argc, jsval *vp)
     return ok;
 }
 
+static JSScript *
+GetTopScript(JSContext *cx)
+{
+    JSScript *script;
+    JS_DescribeScriptedCaller(cx, &script, NULL);
+    return script;
+}
+
 static JSBool
 GetScriptAndPCArgs(JSContext *cx, unsigned argc, jsval *argv, JSScript **scriptp,
                    int32_t *ip)
 {
-    JSScript *script = JS_GetFrameScript(cx, JS_GetScriptedCaller(cx, NULL));
+    JSScript *script = GetTopScript(cx);
     *ip = 0;
     if (argc != 0) {
         jsval v = argv[0];
@@ -1339,8 +1328,12 @@ TrapHandler(JSContext *cx, JSScript *, jsbytecode *pc, jsval *rval,
             jsval closure)
 {
     JSString *str = JSVAL_TO_STRING(closure);
-    JSStackFrame *caller = JS_GetScriptedCaller(cx, NULL);
-    JSScript *script = JS_GetFrameScript(cx, caller);
+
+    FrameRegsIter iter(cx);
+    JS_ASSERT(!iter.done());
+
+    JSStackFrame *caller = Jsvalify(iter.fp());
+    JSScript *script = iter.script();
 
     size_t length;
     const jschar *chars = JS_GetStringCharsAndLength(cx, str, &length);
@@ -1455,7 +1448,7 @@ LineToPC(JSContext *cx, unsigned argc, jsval *vp)
         JS_ReportErrorNumber(cx, my_GetErrorMessage, NULL, JSSMSG_LINE2PC_USAGE);
         return JS_FALSE;
     }
-    script = JS_GetFrameScript(cx, JS_GetScriptedCaller(cx, NULL));
+    script = GetTopScript(cx);
     jsval v = JS_ARGV(cx, vp)[0];
     if (!JSVAL_IS_PRIMITIVE(v) &&
         JS_GetClass(JSVAL_TO_OBJECT(v)) == Jsvalify(&FunctionClass))
@@ -1550,12 +1543,8 @@ SrcNotes(JSContext *cx, JSScript *script, Sprinter *sp)
         const char *name = js_SrcNoteSpec[type].name;
         if (type == SRC_LABEL) {
             /* Check if the source note is for a switch case. */
-            if (switchTableStart <= offset && offset < switchTableEnd) {
+            if (switchTableStart <= offset && offset < switchTableEnd)
                 name = "case";
-            } else {
-                JSOp op = JSOp(script->code[offset]);
-                JS_ASSERT(op == JSOP_LABEL);
-            }
         }
         Sprint(sp, "%3u: %4u %5u [%4u] %-8s", unsigned(sn - notes), lineno, offset, delta, name);
         switch (type) {
@@ -1594,7 +1583,7 @@ SrcNotes(JSContext *cx, JSScript *script, Sprinter *sp)
             Sprint(sp, " atom %u (", index);
             size_t len = PutEscapedString(NULL, 0, atom, '\0');
             if (char *buf = sp->reserve(len)) {
-                PutEscapedString(buf, len, atom, 0);
+                PutEscapedString(buf, len + 1, atom, 0);
                 buf[len] = 0;
             }
             Sprint(sp, ")");
@@ -1705,32 +1694,7 @@ DisassembleScript(JSContext *cx, JSScript *script, JSFunction *fun, bool lines, 
 
         if (fun->isNullClosure())
             Sprint(sp, " NULL_CLOSURE");
-        else if (fun->isFlatClosure())
-            Sprint(sp, " FLAT_CLOSURE");
 
-        JSScript *script = fun->script();
-        if (script->bindings.hasUpvars()) {
-            Sprint(sp, "\nupvars: {\n");
-
-            Vector<JSAtom *> localNames(cx);
-            if (!script->bindings.getLocalNameArray(cx, &localNames))
-                return false;
-
-            JSUpvarArray *uva = script->upvars();
-            unsigned upvar_base = script->bindings.countArgsAndVars();
-
-            for (uint32_t i = 0, n = uva->length; i < n; i++) {
-                JSAtom *atom = localNames[upvar_base + i];
-                UpvarCookie cookie = uva->vector[i];
-                JSAutoByteString printable;
-                if (js_AtomToPrintableString(cx, atom, &printable)) {
-                    Sprint(sp, "  %s: {skip:%u, slot:%u},\n",
-                           printable.ptr(), cookie.level(), cookie.slot());
-                }
-            }
-
-            Sprint(sp, "}");
-        }
         Sprint(sp, "\n");
     }
 
@@ -1801,8 +1765,7 @@ DisassembleToString(JSContext *cx, unsigned argc, jsval *vp)
     bool ok = true;
     if (p.argc == 0) {
         /* Without arguments, disassemble the current script. */
-        if (JSStackFrame *frame = JS_GetScriptedCaller(cx, NULL)) {
-            JSScript *script = JS_GetFrameScript(cx, frame);
+        if (JSScript *script = GetTopScript(cx)) {
             if (js_Disassemble(cx, script, p.lines, &sprinter)) {
                 SrcNotes(cx, script, &sprinter);
                 TryNotes(cx, script, &sprinter);
@@ -1839,8 +1802,7 @@ Disassemble(JSContext *cx, unsigned argc, jsval *vp)
     bool ok = true;
     if (p.argc == 0) {
         /* Without arguments, disassemble the current script. */
-        if (JSStackFrame *frame = JS_GetScriptedCaller(cx, NULL)) {
-            JSScript *script = JS_GetFrameScript(cx, frame);
+        if (JSScript *script = GetTopScript(cx)) {
             if (js_Disassemble(cx, script, p.lines, &sprinter)) {
                 SrcNotes(cx, script, &sprinter);
                 TryNotes(cx, script, &sprinter);
@@ -2177,23 +2139,18 @@ DumpStack(JSContext *cx, unsigned argc, Value *vp)
         return false;
 
     StackIter iter(cx);
-    JS_ASSERT(iter.nativeArgs().callee().toFunction()->native() == DumpStack);
+    JS_ASSERT(iter.isNativeCall() && iter.callee().toFunction()->native() == DumpStack);
     ++iter;
 
     uint32_t index = 0;
     for (; !iter.done(); ++index, ++iter) {
         Value v;
-        if (iter.isScript()) {
-            if (iter.fp()->isNonEvalFunctionFrame()) {
-                if (!iter.fp()->getValidCalleeObject(cx, &v))
-                    return false;
-            } else if (iter.fp()->isEvalFrame()) {
-                v = StringValue(evalStr);
-            } else {
-                v = StringValue(globalStr);
-            }
+        if (iter.isNonEvalFunctionFrame() || iter.isNativeCall()) {
+            v = iter.calleev();
+        } else if (iter.isEvalFrame()) {
+            v = StringValue(evalStr);
         } else {
-            v = iter.nativeArgs().calleev();
+            v = StringValue(globalStr);
         }
         if (!JS_SetElement(cx, arr, index, &v))
             return false;
@@ -2609,8 +2566,7 @@ static JSClass sandbox_class = {
     JS_PropertyStub,   JS_PropertyStub,
     JS_PropertyStub,   JS_StrictPropertyStub,
     sandbox_enumerate, (JSResolveOp)sandbox_resolve,
-    JS_ConvertStub,    NULL,
-    JSCLASS_NO_OPTIONAL_MEMBERS
+    JS_ConvertStub
 };
 
 static JSObject *
@@ -2670,9 +2626,10 @@ EvalInContext(JSContext *cx, unsigned argc, jsval *vp)
         return true;
     }
 
-    JSStackFrame *fp = JS_GetScriptedCaller(cx, NULL);
-    JSScript *script = JS_GetFrameScript(cx, fp);
-    jsbytecode *pc = JS_GetFramePC(cx, fp);
+    JSScript *script;
+    unsigned lineno;
+
+    JS_DescribeScriptedCaller(cx, &script, &lineno);
     jsval rval;
     {
         JSAutoEnterCompartment ac;
@@ -2693,7 +2650,7 @@ EvalInContext(JSContext *cx, unsigned argc, jsval *vp)
         }
         if (!JS_EvaluateUCScript(cx, sobj, src, srclen,
                                  script->filename,
-                                 JS_PCToLineNumber(cx, script, pc),
+                                 lineno,
                                  &rval)) {
             return false;
         }
@@ -2781,13 +2738,15 @@ ShapeOf(JSContext *cx, unsigned argc, jsval *vp)
  * non-native referent may be simplified to data properties.
  */
 static JSBool
-CopyProperty(JSContext *cx, JSObject *obj, JSObject *referent, jsid id,
+CopyProperty(JSContext *cx, JSObject *obj_, JSObject *referent, jsid id,
              unsigned lookupFlags, JSObject **objp)
 {
     JSProperty *prop;
     PropertyDescriptor desc;
     unsigned propFlags = 0;
     JSObject *obj2;
+
+    RootedVarObject obj(cx, obj_);
 
     *objp = NULL;
     if (referent->isNative()) {
@@ -2797,11 +2756,7 @@ CopyProperty(JSContext *cx, JSObject *obj, JSObject *referent, jsid id,
             return true;
 
         const Shape *shape = (Shape *) prop;
-        if (shape->isMethod()) {
-            shape = referent->methodReadBarrier(cx, *shape, &desc.value);
-            if (!shape)
-                return false;
-        } else if (shape->hasSlot()) {
+        if (shape->hasSlot()) {
             desc.value = referent->nativeGetSlot(shape->slot());
         } else {
             desc.value.setUndefined();
@@ -2869,8 +2824,7 @@ static JSClass resolver_class = {
     JS_PropertyStub,   JS_PropertyStub,
     JS_PropertyStub,   JS_StrictPropertyStub,
     resolver_enumerate, (JSResolveOp)resolver_resolve,
-    JS_ConvertStub,    NULL,
-    JSCLASS_NO_OPTIONAL_MEMBERS
+    JS_ConvertStub
 };
 
 
@@ -3294,8 +3248,7 @@ Compile(JSContext *cx, unsigned argc, jsval *vp)
         JS_PropertyStub,  JS_PropertyStub,
         JS_PropertyStub,  JS_StrictPropertyStub,
         JS_EnumerateStub, JS_ResolveStub,
-        JS_ConvertStub,   NULL,
-        JSCLASS_NO_OPTIONAL_MEMBERS
+        JS_ConvertStub
     };
 
     JSObject *fakeGlobal = JS_NewGlobalObject(cx, &dummy_class);
@@ -3379,9 +3332,8 @@ Snarf(JSContext *cx, unsigned argc, jsval *vp)
         return JS_FALSE;
 
     /* Get the currently executing script's name. */
-    JSStackFrame *fp = JS_GetScriptedCaller(cx, NULL);
-    JSScript *script = JS_GetFrameScript(cx, fp);
-    JS_ASSERT(fp && script->filename);
+    JSScript *script = GetTopScript(cx);
+    JS_ASSERT(script->filename);
     const char *pathname = filename.ptr();
 #ifdef XP_UNIX
     FreeOnReturn pnGuard(cx);
@@ -3443,16 +3395,15 @@ Serialize(JSContext *cx, unsigned argc, jsval *vp)
     if (!JS_WriteStructuredClone(cx, v, &datap, &nbytes, NULL, NULL))
         return false;
 
-    JSObject *arrayobj = js_CreateTypedArray(cx, TypedArray::TYPE_UINT8, nbytes);
-    if (!arrayobj) {
+    JSObject *array = JS_NewUint8Array(cx, nbytes);
+    if (!array) {
         JS_free(cx, datap);
         return false;
     }
-    JSObject *array = TypedArray::getTypedArray(arrayobj);
     JS_ASSERT((uintptr_t(TypedArray::getDataOffset(array)) & 7) == 0);
     js_memcpy(TypedArray::getDataOffset(array), datap, nbytes);
     JS_free(cx, datap);
-    JS_SET_RVAL(cx, vp, OBJECT_TO_JSVAL(arrayobj));
+    JS_SET_RVAL(cx, vp, OBJECT_TO_JSVAL(array));
     return true;
 }
 
@@ -3461,7 +3412,7 @@ Deserialize(JSContext *cx, unsigned argc, jsval *vp)
 {
     jsval v = argc > 0 ? JS_ARGV(cx, vp)[0] : JSVAL_VOID;
     JSObject *obj;
-    if (JSVAL_IS_PRIMITIVE(v) || !js_IsTypedArray((obj = JSVAL_TO_OBJECT(v)))) {
+    if (JSVAL_IS_PRIMITIVE(v) || !(obj = JSVAL_TO_OBJECT(v))->isTypedArray()) {
         JS_ReportErrorNumber(cx, my_GetErrorMessage, NULL, JSSMSG_INVALID_ARGS, "deserialize");
         return false;
     }
@@ -3820,23 +3771,23 @@ static JSFunctionSpecWithHelp shell_functions[] = {
 
     JS_FN_HELP("elapsed", Elapsed, 0, 0,
 "elapsed()",
-"  Execution time elapsed for the current context.."),
+"  Execution time elapsed for the current context."),
 
     JS_FN_HELP("parent", Parent, 1, 0,
 "parent(obj)",
-"  Returns the parent of obj.."),
+"  Returns the parent of obj."),
 
     JS_FN_HELP("wrap", Wrap, 1, 0,
 "wrap(obj)",
-"  Wrap an object into a noop wrapper.."),
+"  Wrap an object into a noop wrapper."),
 
     JS_FN_HELP("serialize", Serialize, 1, 0,
 "serialize(sd)",
-"  Serialize sd using JS_WriteStructuredClone. Returns a TypedArray.."),
+"  Serialize sd using JS_WriteStructuredClone. Returns a TypedArray."),
 
     JS_FN_HELP("deserialize", Deserialize, 1, 0,
 "deserialize(a)",
-"  Deserialize data generated by serialize.."),
+"  Deserialize data generated by serialize."),
 
     JS_FN_HELP("newGlobal", NewGlobal, 1, 0,
 "newGlobal(kind)",
@@ -4110,16 +4061,16 @@ its_convert(JSContext *cx, JSObject *obj, JSType type, jsval *vp)
 }
 
 static void
-its_finalize(JSContext *cx, JSObject *obj)
+its_finalize(JSFreeOp *fop, JSObject *obj)
 {
     jsval *rootedVal;
     if (its_noisy)
         fprintf(gOutFile, "finalizing it\n");
     rootedVal = (jsval *) JS_GetPrivate(obj);
     if (rootedVal) {
-      JS_RemoveValueRoot(cx, rootedVal);
-      JS_SetPrivate(obj, NULL);
-      delete rootedVal;
+        JS_RemoveValueRootRT(fop->runtime(), rootedVal);
+        JS_SetPrivate(obj, NULL);
+        delete rootedVal;
     }
 }
 
@@ -4127,8 +4078,7 @@ static JSClass its_class = {
     "It", JSCLASS_NEW_RESOLVE | JSCLASS_NEW_ENUMERATE | JSCLASS_HAS_PRIVATE,
     its_addProperty,  its_delProperty,  its_getProperty,  its_setProperty,
     (JSEnumerateOp)its_enumerate, (JSResolveOp)its_resolve,
-    its_convert,      its_finalize,
-    JSCLASS_NO_OPTIONAL_MEMBERS
+    its_convert,      its_finalize
 };
 
 static JSBool
@@ -4348,9 +4298,11 @@ global_enumerate(JSContext *cx, JSObject *obj)
 }
 
 static JSBool
-global_resolve(JSContext *cx, JSObject *obj, jsid id, unsigned flags,
+global_resolve(JSContext *cx, JSObject *obj_, jsid id, unsigned flags,
                JSObject **objp)
 {
+    RootedVarObject obj(cx, obj_);
+
 #ifdef LAZY_STANDARD_CLASSES
     JSBool resolved;
 
@@ -4421,8 +4373,7 @@ JSClass global_class = {
     JS_PropertyStub,  JS_PropertyStub,
     JS_PropertyStub,  JS_StrictPropertyStub,
     global_enumerate, (JSResolveOp) global_resolve,
-    JS_ConvertStub,   its_finalize,
-    JSCLASS_NO_OPTIONAL_MEMBERS
+    JS_ConvertStub,   its_finalize
 };
 
 static JSBool
@@ -4535,8 +4486,7 @@ static JSClass env_class = {
     JS_PropertyStub,  JS_PropertyStub,
     JS_PropertyStub,  env_setProperty,
     env_enumerate, (JSResolveOp) env_resolve,
-    JS_ConvertStub,   NULL,
-    JSCLASS_NO_OPTIONAL_MEMBERS
+    JS_ConvertStub
 };
 
 /*
@@ -4700,11 +4650,6 @@ ProcessArgs(JSContext *cx, JSObject *obj, OptionParser *op)
         JS_ToggleOptions(cx, JSOPTION_METHODJIT);
     }
 
-#ifdef JS_GC_ZEAL
-    if (const char *zeal = op->getStringOption('Z'))
-        ParseZealArg(cx, zeal);
-#endif
-
     if (op->getBoolOption('d')) {
         JS_SetRuntimeDebugMode(JS_GetRuntime(cx), true);
         JS_SetDebugMode(cx, true);
@@ -4867,7 +4812,7 @@ MaybeOverrideOutFileFromEnv(const char* const envVar,
     }
 }
 
-/* Set the initial counter to 1 so the principal will never be destroyed. */ 
+/* Set the initial counter to 1 so the principal will never be destroyed. */
 JSPrincipals shellTrustedPrincipals = { 1 };
 
 JSBool
@@ -4878,7 +4823,6 @@ CheckObjectAccess(JSContext *cx, JSObject *obj, jsid id, JSAccessMode mode, jsva
 
 JSSecurityCallbacks securityCallbacks = {
     CheckObjectAccess,
-    NULL,
     NULL,
     NULL,
     NULL
